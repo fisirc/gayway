@@ -1,0 +1,28 @@
+[package]
+name = "nur_gateway"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.27"
+tokio = { version = "1.45.1", default-features = false, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+] }
+env_logger = "0.10.2"
+dotenvy = "0.15.7"
+lazy_static = "1.5.0"
+tokio-postgres = { version = "0.7.13", default-features = false, features = [
+    "runtime",
+    "with-uuid-1",
+] }
+uuid = { version = "1.17.0", features = ["v4"] }
+twoway = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -1,0 +1,7 @@
+functions:
+  - name: nur-test
+    directory: examples/hello_world
+    template: rust
+    build:
+      command: cargo build --target wasm32-unknown-unknown --release
+      output: target/wasm32-unknown-unknown/release/hello_world.wasm
