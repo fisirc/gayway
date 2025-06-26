@@ -99,7 +99,7 @@ async fn handle_connection(
         .and_then(|l| l.split(':').nth(1))
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    let body_len = request_data.len() - headers_end;
+    let _body_len = request_data.len() - headers_end;
     let mut body = request_data[headers_end..].to_vec();
     while body.len() < content_length {
         let n = stream.read(&mut buffer).await?;
