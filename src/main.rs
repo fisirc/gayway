@@ -42,10 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    info!("Connecting to Supabase service...");
     let functions_service = Arc::new(FunctionSupabaseService::from_env());
     functions_service.check_connection().await?;
+    info!("Connected!");
 
     // Start the gateway server
+    info!("Starting TCP server...");
     let listener = TcpListener::bind("0.0.0.0:8000").await?;
     info!("Gateway server listening on 0.0.0.0:8000");
     info!("Workers: {:?}", workers);
@@ -138,6 +141,7 @@ async fn handle_connection(
             return Ok(());
         }
     };
+    info!("Function UUID: {}", function_uuid);
 
     let last_dpl_time = match functions_service.get_last_depl_time(&function_uuid).await {
         Ok(deployment_time) => deployment_time,
