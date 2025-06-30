@@ -24,4 +24,6 @@ lazy_static! {
     pub static ref CARGO_PKG_NAME: String = env_var_or!("CARGO_PKG_NAME", "nur_gateway");
 
     pub static ref POSTGRES_URL: String = env_var!("POSTGRES_URL");
+
+    pub static ref WORKER_HOSTS: String = env_var!("WORKER_HOSTS");
 }

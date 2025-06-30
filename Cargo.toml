@@ -19,6 +19,8 @@ tokio-postgres = { version = "0.7.13", default-features = false, features = [
 ] }
 uuid = { version = "1.17.0", features = ["v4"] }
 twoway = "0.2"
+deadpool-postgres = "0.14.1"
+rand = "0.9.1"
 
 [profile.release]
 opt-level = 3

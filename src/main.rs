@@ -1,14 +1,19 @@
 use dotenvy::dotenv;
 use log::{error, info, warn};
-use std::collections::HashMap;
+use rand::rng;
+use rand::seq::IndexedRandom;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::functions_service::{FunctionService, FunctionSupabaseService};
+
 mod env;
+mod functions_service;
 mod logger;
 
 #[derive(Clone, Debug)]
@@ -17,7 +22,7 @@ struct Worker {
     port: u16,
 }
 
-type WorkerMap = Arc<RwLock<HashMap<String, Worker>>>;
+type WorkerMap = Arc<RwLock<Vec<Worker>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,28 +30,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     logger::build_logger().init();
 
     // Initialize worker map with default worker
-    let workers: WorkerMap = Arc::new(RwLock::new(HashMap::new()));
+    let workers_hosts = crate::env::WORKER_HOSTS.split(",");
+    let workers: WorkerMap = Arc::new(RwLock::new(Vec::new()));
     {
         let mut w = workers.write().await;
-        w.insert(
-            "default".to_string(),
-            Worker {
-                host: "0.0.0.0".to_string(),
+        for whost in workers_hosts {
+            w.push(Worker {
+                host: whost.to_string(),
                 port: 6969,
-            },
-        );
+            });
+        }
     }
+
+    let functions_service = Arc::new(FunctionSupabaseService::from_env());
+    functions_service.check_connection().await?;
 
     // Start the gateway server
     let listener = TcpListener::bind("0.0.0.0:8000").await?;
     info!("Gateway server listening on 0.0.0.0:8000");
+    info!("Workers: {:?}", workers);
 
     loop {
         let (stream, addr) = listener.accept().await?;
         let workers_clone = Arc::clone(&workers);
 
+        let functions_service = functions_service.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, addr, workers_clone).await {
+            if let Err(e) = handle_connection(stream, addr, workers_clone, functions_service).await
+            {
                 error!("Error handling connection from {}: {}", addr, e);
             }
         });
@@ -57,6 +68,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     addr: SocketAddr,
     workers: WorkerMap,
+    functions_service: Arc<FunctionSupabaseService>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Instant;
     info!("New connection from {}", addr);
@@ -99,6 +111,7 @@ async fn handle_connection(
         .and_then(|l| l.split(':').nth(1))
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
+
     let _body_len = request_data.len() - headers_end;
     let mut body = request_data[headers_end..].to_vec();
     while body.len() < content_length {
@@ -114,14 +127,56 @@ async fn handle_connection(
         addr, total_request_size
     );
 
+    // functions_service.
+    let function_uuid = match Uuid::from_str(&function_id) {
+        Ok(uuid) => uuid,
+        Err(e) => {
+            error!("Invalid function_id={function_id}: {e}");
+            let response =
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 19\r\n\r\nInvalid function_id";
+            stream.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
+    };
+
+    let last_dpl_time = match functions_service.get_last_depl_time(&function_uuid).await {
+        Ok(deployment_time) => deployment_time,
+        Err(e) => {
+            error!(
+                "Failed to get last deployment time for function_id {}: {}",
+                function_id, e
+            );
+            let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 19\r\n\r\nService Unavailable";
+            stream.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
+    };
+    info!(
+        "Last deployment time for function_id {}: {:?}",
+        function_id, last_dpl_time
+    );
+
+    if last_dpl_time.is_none() {
+        warn!("No deployments found for function_id={}", function_id);
+        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 18\r\n\r\nFunction not found";
+        stream.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
+    let last_dpl_time = last_dpl_time.unwrap();
+
     // Get worker for this function (using default for now)
     let worker = {
         let workers_read = workers.read().await;
-        workers_read
-            .get("default")
-            .cloned()
-            .ok_or("No worker available")?
+        let worker = workers_read.choose(&mut rng());
+        if worker.is_none() {
+            error!("No workers available");
+            let response = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 20\r\n\r\nNo workers available";
+            stream.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
+        worker.unwrap().clone()
     };
+
     let worker_addr = format!("{}:{}", worker.host, worker.port);
     let mut worker_stream = TcpStream::connect(&worker_addr)
         .await
@@ -129,11 +184,12 @@ async fn handle_connection(
     info!("Connected to worker at {}", worker_addr);
 
     // Perform handshake
-    let handshake_result = perform_handshake(&mut worker_stream, &function_id).await?;
+    let handshake_result =
+        perform_handshake(&mut worker_stream, &function_id, last_dpl_time).await?;
     if handshake_result != 0 {
         error!("Worker handshake failed with code: {}", handshake_result);
         let response =
-            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 19\r\n\r\nWorker unavailable";
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 18\r\n\r\nWorker unavailable";
         stream.write_all(response.as_bytes()).await?;
         return Ok(());
     }
@@ -207,12 +263,10 @@ fn parse_http_request(
 async fn perform_handshake(
     worker_stream: &mut TcpStream,
     function_id: &str,
+    deployment_timestamp: u64,
 ) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
     // Convert function_id to UUID (dummy implementation)
     let function_uuid = convert_function_id_to_uuid(function_id)?;
-
-    // Get deployment timestamp (dummy value: 1970-01-01)
-    let deployment_timestamp = get_function_deployment_timestamp(&function_uuid);
 
     // Prepare handshake message
     let mut handshake = Vec::new();
@@ -267,9 +321,4 @@ fn convert_function_id_to_uuid(
     }
 
     Ok(Uuid::from_bytes(bytes))
-}
-
-fn get_function_deployment_timestamp(_function_uuid: &Uuid) -> u64 {
-    // Dummy implementation: always return Unix timestamp for 1970-01-01 00:00:00 UTC
-    0
 }
